@@ -1,0 +1,323 @@
+
+# ============================================================================
+# Base configuration and container-specific values
+# ============================================================================
+locals {
+  # Paths
+  conf_path   = "/app/conf"
+  ssh_path    = "/app/.ssh"
+  volume_name = "control-plane-volume"
+
+  # Certificate configuration
+  certs_path               = "${local.conf_path}/certs"
+  custom_ca_file_path      = "${local.certs_path}/ca.pem"
+  install_script_file_path = "${local.certs_path}/install-certificates.sh"
+  certificates_enabled     = length(var.certificates) > 0
+  certificates_b64         = local.certificates_enabled ? base64encode(var.certificates) : ""
+  install_script           = local.certificates_enabled ? file("${path.root}/scripts/install-certificates.sh") : ""
+
+  # Shared configuration
+  config_content = <<-EOF
+    control-plane {
+      token = $${?CONTROL_PLANE_TOKEN}
+      description = "${var.description}"
+      enterprise-cloud = ${jsonencode(var.enterprise-cloud)}
+      locations = [%{for location in local.locations} ${jsonencode(location)}, %{endfor}]
+      server = ${jsonencode(var.server)}
+      %{if local.private-package != null}repository = ${jsonencode(local.private-package)}%{endif}
+      %{for key, value in var.extra-content}${key} = "${value}"%{endfor}
+      %{if local.git.ssh_enabled || local.git.creds_enabled}
+      builder {
+        %{if local.git.ssh_enabled}
+        git.global.credentials.ssh {
+          key-file = "${local.ssh_path}/id_gatling"
+        }
+        %{endif}
+        %{if local.git.creds_enabled}
+        git.global.credentials.https {
+          %{if length(var.git.credentials.username) > 0}username = "${var.git.credentials.username}"
+          %{endif}password = $${?GIT_TOKEN}
+        }
+        %{endif}
+      }
+      %{endif}
+    }
+  EOF
+
+  log_group = {
+    "awslogs-group" : "/ecs/${var.name}-service"
+    "awslogs-region" : data.aws_region.current.region
+    "awslogs-create-group" : "true"
+  }
+
+  ecs_secrets = concat(
+    var.task.secrets,
+    [{ name = "CONTROL_PLANE_TOKEN", valueFrom = var.token-secret-arn }],
+    local.git.creds_enabled ? [{ name = "GIT_TOKEN", valueFrom = var.git.credentials.token-secret-arn }] : []
+  )
+
+  # ============================================================================
+  # Container: Conf Loader (init container)
+  # ============================================================================
+  conf_loader = {
+    commands = compact([
+      "echo \"$CONFIG_CONTENT\" > ${local.conf_path}/control-plane.conf && chown -R 1001 ${local.conf_path} && chmod 400 ${local.conf_path}/control-plane.conf",
+      local.git.ssh_enabled ? "echo \"$SSH_KEY\" > ${local.ssh_path}/id_gatling && chown -R 1001 ${local.ssh_path} && chmod 400 ${local.ssh_path}/id_gatling" : "",
+      join(" && ", var.task.init.command)
+    ])
+
+    secrets = concat(
+      local.git.ssh_enabled ? [
+        {
+          name      = "SSH_KEY"
+          valueFrom = var.git.ssh.private-key-secret-arn
+        }
+      ] : [],
+      var.task.init.secrets
+    )
+
+    environment = concat(
+      [
+        {
+          name  = "CONFIG_CONTENT"
+          value = local.config_content
+        }
+      ],
+      var.task.init.environment
+    )
+
+    mountPoints = concat(
+      [
+        {
+          sourceVolume : local.volume_name
+          containerPath : local.conf_path
+          readOnly : false
+        }
+      ],
+      local.git.ssh_enabled ? [
+        {
+          sourceVolume : local.volume_name
+          containerPath : local.ssh_path
+          readOnly : false
+        }
+      ] : []
+    )
+  }
+
+  # ============================================================================
+  # Container: Certificate Installer (init container)
+  # ============================================================================
+  certificate_installer = {
+    install_command = join(" && ", [
+      "mkdir -p ${local.certs_path}",
+      "printf '%s' '${local.install_script}' > ${local.install_script_file_path}",
+      "chmod +x ${local.install_script_file_path}",
+      "sh ${local.install_script_file_path}"
+    ])
+
+    environment = [
+      {
+        name  = "CUSTOM_CA_FILE_PATH"
+        value = local.custom_ca_file_path
+      },
+      {
+        name  = "CUSTOM_CA_CERTIFICATES_B64"
+        value = local.certificates_b64
+      }
+    ]
+
+    mountPoints = [
+      {
+        sourceVolume : "java-security"
+        containerPath : "/shared-java-security"
+        readOnly : false
+      }
+    ]
+  }
+
+  # ============================================================================
+  # Container: Control Plane (main container)
+  # ============================================================================
+  control_plane = {
+    mountPoints = concat(
+      [
+        {
+          sourceVolume : local.volume_name
+          containerPath : local.conf_path
+          readOnly : false
+        }
+      ],
+      local.git.ssh_enabled ? [
+        {
+          sourceVolume : local.volume_name
+          containerPath : local.ssh_path
+          readOnly : false
+        }
+      ] : [],
+      [
+        for cache_path in var.git.cache.paths : {
+          sourceVolume  = local.volume_name
+          containerPath = cache_path
+          readOnly      = false
+        }
+      ],
+      local.certificates_enabled ? [
+        {
+          sourceVolume : "java-security"
+          containerPath : "/usr/lib/jvm/zulu/lib/security"
+          readOnly : false
+        }
+      ] : []
+    )
+
+    certificate_environment_vars = local.certificates_enabled ? [
+      {
+        name  = "GIT_SSL_CAINFO"
+        value = local.custom_ca_file_path
+      },
+      {
+        name  = "NODE_EXTRA_CA_CERTS"
+        value = local.custom_ca_file_path
+      }
+    ] : []
+
+    dependsOn = concat(
+      [
+        {
+          containerName : "conf-loader-init-container"
+          condition : "SUCCESS"
+        }
+      ],
+      local.certificates_enabled ? [
+        {
+          containerName : "certificates-installer-init-container"
+          condition : "SUCCESS"
+        }
+      ] : []
+    )
+  }
+}
+
+# ============================================================================
+# Build container definitions from base values
+# ============================================================================
+locals {
+  containers = {
+    conf_loader = {
+      name : "conf-loader-init-container"
+      image : var.task.init.image
+      cpu : 0
+      essential : false
+      entryPoint : []
+      command : [
+        "/bin/sh",
+        "-c",
+        join(" && ", local.conf_loader.commands)
+      ]
+      environment : local.conf_loader.environment
+      secrets : local.conf_loader.secrets
+      mountPoints : local.conf_loader.mountPoints
+      logConfiguration : var.task.cloudwatch-logs ? {
+        logDriver : "awslogs"
+        options : merge(local.log_group, { "awslogs-stream-prefix" : "init" })
+      } : null
+    }
+
+    certificate_installer = {
+      name : "certificates-installer-init-container"
+      image : "azul/zulu-openjdk:25-jre-headless-latest"
+      cpu : 0
+      essential : false
+      entryPoint : ["bash", "-c"]
+      command : [local.certificate_installer.install_command]
+      environment : local.certificate_installer.environment
+      mountPoints : local.certificate_installer.mountPoints
+      logConfiguration : var.task.cloudwatch-logs ? {
+        logDriver : "awslogs"
+        options : merge(local.log_group, { "awslogs-stream-prefix" : "init-certs" })
+      } : null
+    }
+
+    control_plane = {
+      name : "control-plane"
+      image : var.task.image
+      command : var.task.command
+      cpu : 0
+      essential : true
+      portMappings : [
+        {
+          containerPort : var.server.port,
+          hostPort : var.server.port,
+          protocol : "tcp"
+        }
+      ]
+      workingDirectory : local.conf_path
+      secrets : local.ecs_secrets
+      environment : concat(
+        var.task.environment,
+        local.control_plane.certificate_environment_vars
+      )
+      mountPoints : local.control_plane.mountPoints
+      logConfiguration : var.task.cloudwatch-logs ? {
+        logDriver : "awslogs"
+        options : merge(local.log_group, { "awslogs-stream-prefix" : "main" })
+      } : null
+      dependsOn : local.control_plane.dependsOn
+    }
+  }
+
+  # ============================================================================
+  # Container definitions and volumes
+  # ============================================================================
+  container_definitions = concat(
+    [local.containers.conf_loader],
+    local.certificates_enabled ? [local.containers.certificate_installer] : [],
+    [local.containers.control_plane]
+  )
+
+  volumes = concat(
+    [{ name = local.volume_name }],
+    local.certificates_enabled ? [{ name = "java-security" }] : []
+  )
+}
+
+resource "aws_ecs_cluster" "gatling_cluster" {
+  name = "${var.name}-cluster"
+}
+
+resource "aws_ecs_task_definition" "gatling_task" {
+  family                   = "${var.name}-task"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  task_role_arn            = aws_iam_role.gatling_role.arn
+  execution_role_arn       = aws_iam_role.gatling_role.arn
+  cpu                      = var.task.cpu
+  memory                   = var.task.memory
+  container_definitions    = jsonencode(local.container_definitions)
+
+  dynamic "volume" {
+    for_each = local.volumes
+    content {
+      name = volume.value.name
+    }
+  }
+}
+
+resource "aws_ecs_service" "gatling_service" {
+  name            = "${var.name}-service"
+  cluster         = aws_ecs_cluster.gatling_cluster.id
+  task_definition = aws_ecs_task_definition.gatling_task.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = var.subnets
+    security_groups  = var.security-groups
+    assign_public_ip = var.assign-public-ip
+  }
+
+  depends_on = [
+    aws_ecs_cluster.gatling_cluster,
+    aws_ecs_task_definition.gatling_task
+  ]
+}

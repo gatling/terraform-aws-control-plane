@@ -1,0 +1,272 @@
+data "aws_caller_identity" "current" {}
+
+data "aws_iam_instance_profile" "by_name" {
+  for_each = toset([
+    for location in local.locations : location.iam-instance-profile
+    if location.iam-instance-profile != null
+  ])
+  name = each.key
+}
+
+data "aws_eip" "by_ip" {
+  for_each = toset(flatten([
+    for location in local.locations : location.elastic-ips
+  ]))
+  public_ip = each.key
+}
+
+locals {
+  static_ec2_statements = [
+    {
+      Sid    = "AllowEC2CreateRunTags"
+      Effect = "Allow"
+      Action = ["ec2:CreateTags", "ec2:RunInstances"]
+      Resource = [
+        "arn:aws:ec2:*:*:instance/*",
+        "arn:aws:ec2:*:*:network-interface/*",
+        "arn:aws:ec2:*:*:security-group/*",
+        "arn:aws:ec2:*:*:subnet/*",
+        "arn:aws:ec2:*:*:volume/*",
+        "arn:aws:ec2:*:*:image/*"
+      ]
+    },
+    {
+      Sid      = "EnforceGatlingTag"
+      Effect   = "Deny"
+      Action   = "ec2:RunInstances"
+      Resource = "arn:aws:ec2:*:*:instance/*"
+      Condition = {
+        StringNotLike = { "aws:RequestTag/Name" = "GATLING_LG_*" }
+      }
+    },
+    {
+      Sid      = "AllowTerminateTaggedInstances"
+      Effect   = "Allow"
+      Action   = "ec2:TerminateInstances"
+      Resource = "arn:aws:ec2:*:*:instance/*"
+      Condition = {
+        StringLike = { "aws:ResourceTag/Name" = "GATLING_LG_*" }
+      }
+    },
+    {
+      Sid      = "AllowEC2Describe"
+      Effect   = "Allow"
+      Action   = ["ec2:DescribeImages", "ec2:DescribeInstances"]
+      Resource = "*"
+    }
+  ]
+
+  elastic_ip_statements_extra = distinct(flatten([
+    for location in local.locations : [
+      for elastic_ip in location.elastic-ips : {
+        Sid    = "AllowElasticIP${replace(data.aws_eip.by_ip[elastic_ip].id, "-", "")}"
+        Effect = "Allow"
+        Action = [
+          "ec2:AssociateAddress",
+          "ec2:DisassociateAddress",
+        ]
+        Resource = "arn:aws:ec2:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:elastic-ip/${data.aws_eip.by_ip[elastic_ip].id}"
+      }
+    ]
+  ]))
+
+  elastic_ip_statements_base = [
+    {
+      Sid      = "AllowElasticIPAssociateTaggedInstances"
+      Effect   = "Allow"
+      Action   = ["ec2:AssociateAddress", "ec2:DisassociateAddress"]
+      Resource = "arn:aws:ec2:*:*:instance/*"
+      Condition = {
+        StringLike = { "ec2:ResourceTag/Name" = "GATLING_LG_*" }
+      }
+    },
+    {
+      Sid      = "AllowElasticIPDescribe"
+      Effect   = "Allow"
+      Action   = "ec2:DescribeAddresses"
+      Resource = "*"
+    }
+  ]
+
+  iam_profile_name_statements = distinct([
+    for location in local.locations : {
+      Sid      = "AllowPassRole${replace(location.iam-instance-profile, "/[^0-9A-Za-z]/", "")}"
+      Effect   = "Allow"
+      Action   = "iam:PassRole"
+      Resource = data.aws_iam_instance_profile.by_name[location.iam-instance-profile].role_arn
+    }
+    if location.iam-instance-profile != null
+  ])
+
+  elastic_ip_statements = flatten([
+    length(local.elastic_ip_statements_extra) > 0
+    ? [local.elastic_ip_statements_base]
+    : [],
+    [local.elastic_ip_statements_extra],
+  ])
+
+  elastic_ip_statement_chunks = [
+    for i in range(0, length(local.elastic_ip_statements), 10) :
+    slice(
+      local.elastic_ip_statements,
+      i,
+      min(i + 10, length(local.elastic_ip_statements))
+    )
+  ]
+
+  iam_ec2_policy_statements = concat(
+    local.static_ec2_statements,
+    local.iam_profile_name_statements
+  )
+}
+
+resource "aws_iam_role" "gatling_role" {
+  name = "${var.name}-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = "sts:AssumeRole",
+        Effect = "Allow",
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+      },
+    ]
+  })
+}
+
+resource "aws_iam_policy" "ec2_policy_base" {
+  name = "${var.name}-ec2-policy"
+  policy = jsonencode({
+    Version   = "2012-10-17",
+    Statement = local.iam_ec2_policy_statements
+  })
+}
+
+resource "aws_iam_policy" "ec2_policy_elastic_ips" {
+  for_each = {
+    for idx, statements in local.elastic_ip_statement_chunks :
+    idx => statements
+  }
+
+  name = "${var.name}-ec2-policy-elastic-ips-${each.key}"
+  policy = jsonencode({
+    Version   = "2012-10-17",
+    Statement = each.value
+  })
+}
+
+resource "aws_iam_policy" "package_s3_policy" {
+  count = local.private-package != null ? 1 : 0
+  name  = "${var.name}-package-s3-policy"
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+        ],
+        Effect   = "Allow",
+        Resource = "arn:aws:s3:::${local.private-package.bucket}/*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_policy" "asm_policy" {
+  name = "${var.name}-asm-policy"
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "secretsmanager:GetSecretValue"
+        ],
+        Resource = concat(
+          [var.token-secret-arn],
+          [for secret in var.task.secrets : secret["valueFrom"] if contains(keys(secret), "valueFrom")],
+          [for secret in var.task.init.secrets : secret["valueFrom"] if contains(keys(secret), "valueFrom")],
+          local.git.creds_enabled ? [var.git.credentials.token-secret-arn] : [],
+          local.git.ssh_enabled ? [var.git.ssh.private-key-secret-arn] : []
+        )
+      }
+    ]
+  })
+}
+
+resource "aws_iam_policy" "ecr_policy" {
+  count = var.task.ecr ? 1 : 0
+  name  = "${var.name}-ecr-policy"
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "ecr:GetAuthorizationToken",
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage"
+        ],
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_policy" "cloudwatch_logs_policy" {
+  count = var.task.cloudwatch-logs ? 1 : 0
+  name  = "${var.name}-cloudwatch-logs-policy"
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ec2_policy_base_attachment" {
+  role       = aws_iam_role.gatling_role.name
+  policy_arn = aws_iam_policy.ec2_policy_base.arn
+}
+
+resource "aws_iam_role_policy_attachment" "ec2_policy_elastic_ips_attachment" {
+  for_each   = aws_iam_policy.ec2_policy_elastic_ips
+  role       = aws_iam_role.gatling_role.name
+  policy_arn = each.value.arn
+}
+
+resource "aws_iam_role_policy_attachment" "package_s3_policy_attachment" {
+  count      = local.private-package != null ? 1 : 0
+  role       = aws_iam_role.gatling_role.name
+  policy_arn = aws_iam_policy.package_s3_policy[0].arn
+}
+
+resource "aws_iam_role_policy_attachment" "cloudwatch_logs_policy_attachment" {
+  count      = var.task.cloudwatch-logs ? 1 : 0
+  role       = aws_iam_role.gatling_role.name
+  policy_arn = aws_iam_policy.cloudwatch_logs_policy[0].arn
+}
+
+resource "aws_iam_role_policy_attachment" "asm_policy_attachment" {
+  role       = aws_iam_role.gatling_role.name
+  policy_arn = aws_iam_policy.asm_policy.arn
+}
+
+resource "aws_iam_role_policy_attachment" "ecr_policy_attachment" {
+  count      = var.task.ecr ? 1 : 0
+  role       = aws_iam_role.gatling_role.name
+  policy_arn = aws_iam_policy.ecr_policy[0].arn
+}
