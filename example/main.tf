@@ -5,7 +5,7 @@ provider "aws" {
 # Create a control plane based on AWS ECS
 # Reference: https://docs.gatling.io/reference/install/cloud/private-locations/aws/installation/
 module "control-plane" {
-  source           = "git::https://github.com/gatling/terraform-aws-control-plane"
+  source           = "gatling/control-plane/aws"
   name             = "<Name>"
   description      = "My AWS control plane description"
   token-secret-arn = "<TokenSecretARN>"
