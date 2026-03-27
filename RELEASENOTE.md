@@ -1,3 +1,3 @@
-# Small changes
+# Changes
 
-* Publish module on [Terraform Registry](https://registry.terraform.io/modules/gatling/control-plane/aws/latest) under `gatling/control-plane/aws`
+* `ecr_policy`, `asm_policy` and `cloudwatch_logs_policy` are now correctly attached to a dedicated ECS execution role, separate from the task role.     
