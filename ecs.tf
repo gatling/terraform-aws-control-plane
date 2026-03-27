@@ -290,7 +290,7 @@ resource "aws_ecs_task_definition" "gatling_task" {
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
   task_role_arn            = aws_iam_role.gatling_role.arn
-  execution_role_arn       = aws_iam_role.gatling_role.arn
+  execution_role_arn       = aws_iam_role.gatling_execution_role.arn
   cpu                      = var.task.cpu
   memory                   = var.task.memory
   container_definitions    = jsonencode(local.container_definitions)

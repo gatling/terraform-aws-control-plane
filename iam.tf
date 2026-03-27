@@ -136,6 +136,22 @@ resource "aws_iam_role" "gatling_role" {
   })
 }
 
+resource "aws_iam_role" "gatling_execution_role" {
+  name = "${var.name}-execution-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = "sts:AssumeRole",
+        Effect = "Allow",
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+      },
+    ]
+  })
+}
+
 resource "aws_iam_policy" "ec2_policy_base" {
   name = "${var.name}-ec2-policy"
   policy = jsonencode({
@@ -256,17 +272,17 @@ resource "aws_iam_role_policy_attachment" "package_s3_policy_attachment" {
 
 resource "aws_iam_role_policy_attachment" "cloudwatch_logs_policy_attachment" {
   count      = var.task.cloudwatch-logs ? 1 : 0
-  role       = aws_iam_role.gatling_role.name
+  role       = aws_iam_role.gatling_execution_role.name
   policy_arn = aws_iam_policy.cloudwatch_logs_policy[0].arn
 }
 
 resource "aws_iam_role_policy_attachment" "asm_policy_attachment" {
-  role       = aws_iam_role.gatling_role.name
+  role       = aws_iam_role.gatling_execution_role.name
   policy_arn = aws_iam_policy.asm_policy.arn
 }
 
 resource "aws_iam_role_policy_attachment" "ecr_policy_attachment" {
   count      = var.task.ecr ? 1 : 0
-  role       = aws_iam_role.gatling_role.name
+  role       = aws_iam_role.gatling_execution_role.name
   policy_arn = aws_iam_policy.ecr_policy[0].arn
 }
