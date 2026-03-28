@@ -166,7 +166,7 @@ variable "private-package" {
   default = null
 
   validation {
-    condition     = var.private-package == null || length(var.private-package.bucket) > 0
+    condition     = var.private-package == null ? true : length(var.private-package.bucket) > 0
     error_message = "Bucket name of the S3 private package must not be empty."
   }
 }
