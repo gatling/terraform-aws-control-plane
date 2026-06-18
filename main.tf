@@ -1,5 +1,5 @@
 locals {
-  locations       = [for loc in var.locations : merge(loc, { type = "aws" })]
+  locations       = [for loc in var.locations : merge(loc, { type = "aws", spot = loc.spot == "preferred" ? "preferred" : loc.spot == "true" })]
   private-package = var.private-package != null ? merge(var.private-package, { type = "aws" }) : null
 
   git = {
