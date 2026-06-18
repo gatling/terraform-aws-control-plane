@@ -94,7 +94,7 @@ variable "locations" {
     region        = string
     engine        = optional(string, "classic")
     instance-type = optional(string, "c7i.xlarge")
-    spot          = optional(bool, false)
+    spot          = optional(string, "false")
     ami = optional(object({
       type = optional(string, "certified")
       java = optional(string, "latest")
@@ -151,6 +151,11 @@ variable "locations" {
   validation {
     condition     = alltrue([for loc in var.locations : !(loc.auto-associate-public-ipv4 && length(loc.elastic-ips) > 0)])
     error_message = "When elastic_ips are provided, auto-associate-public-ipv4 must be false."
+  }
+
+  validation {
+    condition     = alltrue([for loc in var.locations : contains(["true", "false", "preferred"], loc.spot)])
+    error_message = "spot must be 'true', 'false', or 'preferred'."
   }
 }
 

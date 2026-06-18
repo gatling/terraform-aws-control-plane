@@ -20,14 +20,23 @@ locals {
     {
       Sid    = "AllowEC2CreateRunTags"
       Effect = "Allow"
-      Action = ["ec2:CreateTags", "ec2:RunInstances"]
+      Action = [
+        "ec2:CreateTags",
+        "ec2:RunInstances",
+        "ec2:CreateLaunchTemplate",
+        "ec2:DeleteLaunchTemplate",
+        "ec2:CreateFleet",
+        "ec2:DeleteFleets"
+      ]
       Resource = [
         "arn:aws:ec2:*:*:instance/*",
         "arn:aws:ec2:*:*:network-interface/*",
         "arn:aws:ec2:*:*:security-group/*",
         "arn:aws:ec2:*:*:subnet/*",
         "arn:aws:ec2:*:*:volume/*",
-        "arn:aws:ec2:*:*:image/*"
+        "arn:aws:ec2:*:*:image/*",
+        "arn:aws:ec2:*:*:launch-template/*",
+        "arn:aws:ec2:*:*:fleet/*"
       ]
     },
     {
