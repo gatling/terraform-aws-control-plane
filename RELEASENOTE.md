@@ -1,2 +1,0 @@
-- Add `preferred` configuration for AWS private locations `spot` option.
-- Update IAM policies to deploy locations using EC2 Fleets.
