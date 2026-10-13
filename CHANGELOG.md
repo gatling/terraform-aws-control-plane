@@ -1,1 +1,1 @@
-No changes
+- Grant `ec2:DescribeSubnets` so the Control Plane tries the AWS subnets with the most free IPs first (Control Plane 2026.42.2 and later).
