@@ -60,7 +60,7 @@ locals {
     {
       Sid      = "AllowEC2Describe"
       Effect   = "Allow"
-      Action   = ["ec2:DescribeImages", "ec2:DescribeInstances"]
+      Action   = ["ec2:DescribeImages", "ec2:DescribeInstances", "ec2:DescribeSubnets"]
       Resource = "*"
     }
   ]
