@@ -111,6 +111,9 @@ variable "locations" {
       instance          = optional(map(string), {})
       volume            = optional(map(string), {})
       network-interface = optional(map(string), {})
+      # Left out of the configuration when unset, as Control Planes before 2026.42.3 reject these keys
+      launch-template = optional(map(string))
+      fleet           = optional(map(string))
     }), {})
     system-properties = optional(map(string), {})
     java-home         = optional(string, null)

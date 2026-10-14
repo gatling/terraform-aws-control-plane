@@ -38,6 +38,8 @@ module "control-plane" {
       #   instance          = {}
       #   volume            = {}
       #   network-interface = {}
+      #   launch-template   = {}
+      #   fleet             = {}
       # }
       # system-properties = {}
       # java-home         = "/usr/lib/jvm/zulu"
